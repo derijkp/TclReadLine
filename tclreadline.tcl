@@ -1,24 +1,25 @@
 #
 # tclline: An attempt at a pure tcl readline.
 #
-# This base code taken from https://wiki.tcl-lang.org/20215 and
-# https://wiki.tcl-lang.org/16139
+# This base code taken from http://wiki.tcl.tk/20215 and
+# http://wiki.tcl.tk/16139
 #
 # Author: HCG
-# Licence: "as freely available as possible" https://wiki.tcl-lang.org/4381
+# Licence: "as freely available as possible" http://wiki.tcl.tk/4381
 #
 # Modified by rjmcmahon: fixes history and multiple key sequences per input char (may not assume atomic)
 # Also added ability to extend the completion handlers
 #
-# Note: The wiki.tcl.tk is broken with respect to creating a new page and reverting back to an old page
-# Some comments from the previous wiki page no longer shown as the file upload seem to overwrite the entire wiki page.
-#
-# [LV] Actually, it isn't broken - but there might be a misunderstanding in terms of the functionality of file upload.
-# The comments on each page are literally part of the page itself. The file upload replaces the complete contents of the page with new contents
-# Thus, if the comments would be useful to keep, you should download the current wiki text page, replace the portion of the page containing
-# code or whatever with the new contents, then upload the entire page. By just uploading tclline, you are effectively saying "the only thing
-# I want on this page is the contents of this file".
-#
+# Modified by Peter De Rijk
+# - ctrl-C (sigint) will interrupt running code while keeping shell alive (instead of ignoring with Tclx or killing entire program without)
+# - tab completion using Shift-Tab (so we can still enter/copy-paste actual tabs)
+# - ctrl-left and ctrl-right to move left and right by word
+# - limit the number of characters displayed of return/result, can e.g. be set to max 200 characters with
+#     printlimit 200
+#         or unset with 
+#     printlimit ""
+# - default signal handling using Expect (not TclX as it interferes with some code)
+# - catch errors in tab completion code
 
 # example usage in .tclshrc:
 #
@@ -27,36 +28,38 @@
 #   set ::TclReadLine::PROMPT {\033\[36mtclsh-[info patchlevel]\033\[0m \[\033\[34m[file tail [pwd]\033\[0m]\]\033\[31m % \033\[0m}
 #   tailcall ::TclReadLine::interact
 
-
 package provide TclReadLine 1.1
 
 if {[catch {
-    # Use Tclx if available:
-    package require Tclx
-
-    interp alias {} stty exec stty
-
-    # Prevent sigint from killing our shell:
-    signal ignore SIGINT
-}]} {
-    # else, fall back on Expect:
+    # Use Expect if available:
     package require Expect
 
     interp alias {} stty {} exp_stty
 
-    # Prevent sigint from killing our shell:
-    exp_trap SIG_IGN SIGINT
+    # Prevent sigint (ctrl-C) from killing our shell; instead interupt loop/procedure
+    exp_trap -code {
+        error interrupted
+    } SIGINT
     # Handle terminal resize events:
     exp_trap ::TclReadLine::getColumns SIGWINCH
+}]} {
+#    commented out, because Tclx interferes with some of my software
+#    # else, fall back on Tclx:
+#    package require Tclx
+#
+#    interp alias {} stty stty
+#
+#    # Prevent sigint from killing our shell:
+#    signal ignore SIGINT
+#	interp alias {} stty stty
 }
-
 
 namespace eval TclReadLine {
 
     namespace export interact
 
     # Initialise our own env variables:
-    variable PROMPT ">"
+    variable PROMPT "% "
     variable COMPLETION_MATCH ""
     
     # Support extensions to the completion handling
@@ -73,6 +76,7 @@ namespace eval TclReadLine {
     
     variable CMDLINE ""
     variable CMDLINE_CURSOR 0
+    variable CMDLINE_TABCOMPLETION 1
     variable CMDLINE_LINES 0
     variable CMDLINE_PARTIAL
     
@@ -133,9 +137,9 @@ proc TclReadLine::clearline {} {
 proc TclReadLine::getColumns {} {
     variable COLUMNS
     set cols 0
-    if {![catch {stty size} size]} {
+    if {![catch {exec stty size} size]} {
         lassign $size rows cols
-    } elseif {![catch {stty -a} err]} {
+    } elseif {![catch {exec stty -a} err]} {
         # check for Linux stlye stty output
         if {[regexp {rows (= )?(\d+); columns (= )?(\d+)} $err - i1 rows i2 cols]} {
             return [set COLUMNS $cols]
@@ -184,7 +188,6 @@ proc TclReadLine::localPuts {args} {
 }
 
 proc TclReadLine::prompt {{txt ""}} {
-    
     if { "" != [info var ::tcl_prompt1] } {
         rename ::puts ::_origPuts
         rename TclReadLine::localPuts ::puts
@@ -198,18 +201,17 @@ proc TclReadLine::prompt {{txt ""}} {
         variable PROMPT
         set prompt [subst $PROMPT]
     }
-    set txt "$prompt$txt"
     variable CMDLINE_LINES
     variable CMDLINE_CURSOR
     variable COLUMNS
     foreach {end mid} $CMDLINE_LINES break
-    
+    set txt "$prompt$txt"
     # Calculate how many extra lines we need to display.
     # Also calculate cursor position:
+# putsvars CMDLINE_LINES CMDLINE_CURSOR COLUMNS prompt txt
     set n -1
     set totalLen 0
-    set visprompt [regsub -all {\x1b\[[0-9;]*[a-zA-Z]} $prompt {}]  ;# strip colour codes
-    set cursorLen [expr {$CMDLINE_CURSOR+[string length $visprompt]}]
+    set cursorLen [expr {$CMDLINE_CURSOR+[string length $prompt]}]
     set row 0
     set col 0
     
@@ -227,6 +229,14 @@ proc TclReadLine::prompt {{txt ""}} {
             if {$cursorLen >= $len} {
                 set col 0
                 incr row
+            } else {
+		set tabs [regexp -all \t [string range $line 0 [expr {$col-1}]]]
+		if {$tabs} {
+			set col [expr {$col + 7*$tabs}]
+			if {$row == 0} {
+				incr col -[string length $prompt]
+			}
+		}
             }
             set found 1
         }
@@ -276,6 +286,27 @@ proc TclReadLine::print {txt {wait wait}} {
     }
 }
 
+proc TclReadLine::printresult {txt {wait wait}} {
+# puts txt=\"$txt\"
+    # limit size of output to term
+    if {[info exists ::TclReadLine::printlimit]} {
+        if {[::string length $txt] > $::TclReadLine::printlimit} {
+		set half [expr {$::TclReadLine::printlimit/2}]
+		set txt "[string range $txt 0 $half]\n ... skipping [expr {[string length $txt]-$::TclReadLine::printlimit}] characters ... \n[string range $txt end-$half end]"
+	}
+    }
+    # Sends output to stdout chunks at a time.
+    # This is to prevent the terminal from
+    # hanging if we output too much:
+    while {[string length $txt]} {
+        puts -nonewline [string range $txt 0 2047]
+        set txt [string range $txt 2048 end]
+        if {$wait == "wait"} {
+            after 1
+        }
+    }
+}
+
 proc TclReadLine::unknown {args} {
     
     set name [lindex $args 0]
@@ -312,20 +343,15 @@ proc TclReadLine::unalias {word} {
     array unset ALIASES $word
 }
 
-################################
 # Key bindings
-################################
 proc TclReadLine::handleEscapes {} {
-    
     variable CMDLINE
     variable CMDLINE_CURSOR
-    
     upvar 1 keybuffer keybuffer
     set seq ""
     set found 0
     while {[set ch [readbuf keybuffer]] != ""} {
         append seq $ch
-
         switch -exact -- $seq {
             "\[A" { ;# Cursor Up (cuu1,up)
                 handleHistory 1
@@ -344,6 +370,24 @@ proc TclReadLine::handleEscapes {} {
             "\[D" { ;# Cursor Left
                 if {$CMDLINE_CURSOR > 0} {
                     incr CMDLINE_CURSOR -1
+                }
+                set found 1; break
+            }
+           "\[1;5C" { ;# Control-Cursor Right
+                set dstCursor [tcl_endOfWord $CMDLINE $CMDLINE_CURSOR]
+                if {$dstCursor < 0} {
+                    set dstCursor [string length $CMDLINE]
+                }
+                set CMDLINE_CURSOR $dstCursor
+                set found 1; break
+            }
+            "\[1;5D" { ;# Control-Cursor Left
+                set CMDLINE_CURSOR [tcl_startOfPreviousWord $CMDLINE $CMDLINE_CURSOR]
+                set found 1; break
+            }
+            "\[Z" { ;# Shift-Tab
+                if {[catch {handleCompletion} msg]} {
+                    print "error in TclReadLine tab completion: $msg\n"
                 }
                 set found 1; break
             }
@@ -380,6 +424,7 @@ proc TclReadLine::handleControls {} {
     
     variable CMDLINE
     variable CMDLINE_CURSOR
+    variable CMDLINE_TABCOMPLETION
     
     upvar 1 char char
     upvar 1 keybuffer keybuffer
@@ -419,6 +464,19 @@ proc TclReadLine::handleControls {} {
             variable YANK
             set YANK  [string range $CMDLINE [expr {$CMDLINE_CURSOR  } ] end ]
             set CMDLINE [string range $CMDLINE 0 [expr {$CMDLINE_CURSOR - 1 } ]]
+        }
+        \u0014 { ;# ^t
+            if {$CMDLINE_TABCOMPLETION} {
+                set CMDLINE_TABCOMPLETION 0
+                print "TAB completion off\n"
+            } else {
+                set CMDLINE_TABCOMPLETION 1
+                print "TAB completion on\n"
+            }
+        }
+        \u0015 { ;# ^u
+            set CMDLINE ""
+            set CMDLINE_CURSOR 0
         }
         \u0019 { ;# ^y
             variable YANK
@@ -494,7 +552,13 @@ proc TclReadLine::handleCompletion {} {
 proc TclReadLine::handleCompletionBase {} {
     variable CMDLINE
     variable CMDLINE_CURSOR
-    
+    variable CMDLINE_TABCOMPLETION
+    set prev [string index $CMDLINE [expr {$CMDLINE_CURSOR-1}]]
+    if {!$CMDLINE_TABCOMPLETION || $CMDLINE_CURSOR == 0 || $prev eq "\n" || $prev eq "\t"} {
+        append CMDLINE \t
+        incr CMDLINE_CURSOR
+        return
+    }
     set vars ""
     set cmds ""
     set execs ""
@@ -541,7 +605,13 @@ proc TclReadLine::handleCompletionBase {} {
     } else {
         # Check if word is possibly a path:
         if {$firstchar == "/" || $firstchar == "." || $wordstart != 0} {
-            set files [glob -nocomplain -- $word*]
+            if {[catch {
+                set files [glob -nocomplain -- $word*]
+            }]} {
+                append CMDLINE \t
+                incr CMDLINE_CURSOR
+                return
+            }
         }
         if {$files == ""} {
             # Not a path then get all possibilities:
@@ -684,9 +754,7 @@ proc TclReadLine::handleHistory {x} {
     }
 }
 
-################################
 # History handling functions
-################################
 
 proc TclReadLine::getHistory {} {
     variable HISTORY_SIZE
@@ -709,20 +777,18 @@ proc TclReadLine::setHistory {hlist} {
     }
 }
 
-################################
 # main()
-################################
 
 proc TclReadLine::rawInput {} {
     fconfigure stdin -buffering none -blocking 0
     fconfigure stdout -buffering none -translation crlf
-    stty raw -echo
+    exec stty raw -echo isig
 }
 
 proc TclReadLine::lineInput {} {
-    fconfigure stdin -buffering line -blocking 1
-    fconfigure stdout -buffering line
-    stty -raw echo
+    fconfigure stdin -buffering line -blocking 1 -buffersize 16384
+    fconfigure stdout -buffering line -buffersize 16384
+    exec stty -raw echo isig
 }
 
 proc TclReadLine::doExit {{code 0}} {
@@ -835,11 +901,21 @@ proc TclReadLine::check_partial_keyseq {buffer} {
     }
 }
 
+proc putsvars args {
+	foreach varVar $args {
+		upvar $varVar var
+		if {[info exists var]} {
+			TclReadLine::print [list set $varVar $var]\n
+		} else {
+			TclReadLine::print [list unset $varVar]\n
+		}
+	}
+}
+
 proc TclReadLine::tclline {} {
     variable COLUMNS
     variable CMDLINE_CURSOR
     variable CMDLINE
-    
     set char ""
     set keybuffer [read stdin]
     set COLUMNS [getColumns]
@@ -849,12 +925,12 @@ proc TclReadLine::tclline {} {
     while {$keybuffer != ""} {
         if {[eof stdin]} return
         set char [readbuf keybuffer]
+# print $char
         if {$char == ""} {
             # Sleep for a bit to reduce CPU overhead:
             after 40
             continue
         }
-        
         if {[string is print $char]} {
             set x $CMDLINE_CURSOR
             
@@ -866,14 +942,23 @@ proc TclReadLine::tclline {} {
             append CMDLINE $trailing
             incr CMDLINE_CURSOR
         } elseif {$char == "\t"} {
-            handleCompletion
+            # if {[catch {handleCompletion} msg]} {
+            #     print "error in TclReadLine tab completion: $msg\n"
+            # }
+            # if {$x < 1 && [string trim $char] == ""} continue
+            # treat like all other characters instead (but copied here for now)
+            set x $CMDLINE_CURSOR
+            set trailing [string range $CMDLINE $x end]
+            set CMDLINE [string replace $CMDLINE $x end]
+            append CMDLINE $char
+            append CMDLINE $trailing
+            incr CMDLINE_CURSOR
         } elseif {$char == "\n" || $char == "\r"} {
             if {[info complete $CMDLINE] &&
                 [string index $CMDLINE end] != "\\"} {
-                lineInput
+                 lineInput
                 print "\n" nowait
                 uplevel \#0 {
-                    
                     # Handle aliases:
                     set cmdline $TclReadLine::CMDLINE
                     #
@@ -923,7 +1008,7 @@ proc TclReadLine::tclline {} {
                     
                     rename ::info ::_info
                     rename TclReadLine::localInfo ::info
-
+                    
                     # Reset HISTORY_LEVEL before next command
                     set TclReadLine::HISTORY_LEVEL 0
                     if {[info exists TclReadLine::CMDLINE_PARTIAL]} {
@@ -937,7 +1022,7 @@ proc TclReadLine::tclline {} {
                     if {$code == 1} {
                         TclReadLine::print "$::errorInfo\n"
                     } else {
-                        TclReadLine::print "$res\n"
+                        TclReadLine::printresult "$res\n"
                     }
                     
                     set TclReadLine::CMDLINE ""
@@ -955,6 +1040,7 @@ proc TclReadLine::tclline {} {
                 append CMDLINE $char
                 append CMDLINE $trailing
                 incr CMDLINE_CURSOR
+print "\n" nowait
             }
         } else {
             handleControls
@@ -963,14 +1049,51 @@ proc TclReadLine::tclline {} {
     prompt $CMDLINE
 }
 
+proc TclReadLine::printlimit {args} {
+	if {![llength $args]} {
+		if {![info exists ::TclReadLine::printlimit]} {
+			return ""
+		} else {
+			return $::TclReadLine::printlimit
+		}
+	}
+	set num [lindex $args 0]
+	if {$num eq ""} {
+		unset -nocomplain ::TclReadLine::printlimit
+	} else {
+		set ::TclReadLine::printlimit $num
+	}
+}
+
+proc printlimit {args} {
+	TclReadLine::printlimit {*}$args
+}
+
+proc TclReadLine::show {txt} {
+	::set keep $::TclReadLine::printlimit
+	::unset ::TclReadLine::printlimit
+	TclReadLine::print $txt
+	::set ::TclReadLine::printlimit $keep
+}
+
 # start immediately if invoked as a script:
 if {!$::tcl_interactive && [info script] eq $::argv0} {
     TclReadLine::interact
 }
 
+#
+# Use the following to invoke readline  
+#
+# TclReadLine::interact
+#
+# Use the following to add tab completion
+#
+# TclReadLine::addCompletionHandler TclReadLine::handleCompletionBase
+#
 # Put the following in your .tclshrc
 #  if {$::tcl_interactive} {
 #    package require TclReadLine
 #    TclReadLine::interact
 #  }
+
 
