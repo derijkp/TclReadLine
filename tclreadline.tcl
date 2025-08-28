@@ -16,6 +16,8 @@
 # - optional tab completion (with Tab), but excluding tabs at the start of a line (allows copy-paste for code indented with tabs, but not tabs in the code)
 # - catch errors in tab completion code
 # - ctrl-left and ctrl-right to move left and right by word
+# - ctrl-up (or shift-up) and ctrl-down (or shift-down) to move up and down one line in editing mode
+# - shift-left and shift-right to move to begin and end of the current line in editing mode
 # - limit the number of characters displayed of return/result, can e.g. be set to max 200 characters with
 #     printlimit 200
 #         or unset with 
@@ -373,6 +375,68 @@ proc TclReadLine::unalias {word} {
     array unset ALIASES $word
 }
 
+proc TclReadLine::cursorUp {CMDLINE CMDLINE_CURSOR} {
+# eputsvars CMDLINE CMDLINE_CURSOR
+    if {$CMDLINE_CURSOR <= 0} {return $CMDLINE_CURSOR}
+    set newlines [list {0 0} {*}[regexp -all -inline -indices -- {\n} [string range $CMDLINE 0 $CMDLINE_CURSOR-1]]]
+    if {[llength $newlines] < 2} {
+        return $CMDLINE_CURSOR
+    }
+    set startline [lindex $newlines end 0]
+    set col [expr {$CMDLINE_CURSOR-$startline}]
+    set startprevline [lindex $newlines end-1 0]
+    set CMDLINE_CURSOR [expr {$startprevline+$col}]
+    if {$CMDLINE_CURSOR >= $startline} {
+        set CMDLINE_CURSOR [expr {$startline-1}]
+    }
+    return $CMDLINE_CURSOR
+}
+
+proc TclReadLine::cursorDown {CMDLINE CMDLINE_CURSOR} {
+# eputsvars CMDLINE CMDLINE_CURSOR
+    set len [string length $CMDLINE]
+    if {$CMDLINE_CURSOR >= $len} {return $CMDLINE_CURSOR}
+    set newlines [regexp -all -inline -indices -- {\n} $CMDLINE]
+    set prev 0
+    foreach temp $newlines {
+        set pos [lindex $temp 0]
+        if {$CMDLINE_CURSOR <= $pos} {
+            set col [expr {$CMDLINE_CURSOR-$prev}]
+            set CMDLINE_CURSOR [expr {$pos+$col}]
+            if {$CMDLINE_CURSOR > $len} {
+                set CMDLINE_CURSOR $len
+            }
+            break
+	}
+        set prev $pos
+    }
+    return $CMDLINE_CURSOR
+}
+
+proc TclReadLine::shiftcursorLeft {CMDLINE CMDLINE_CURSOR} {
+# eputsvars CMDLINE CMDLINE_CURSOR
+    if {$CMDLINE_CURSOR <= 0} {return $CMDLINE_CURSOR}
+    set newlines [regexp -all -inline -indices -- {\n} [string range $CMDLINE 0 $CMDLINE_CURSOR-1]]
+    if {[llength $newlines] == 0} {
+        set CMDLINE_CURSOR 0
+    } else {
+        set CMDLINE_CURSOR [expr {[lindex $newlines end 0]+1}]
+    }
+    return $CMDLINE_CURSOR
+}
+
+proc TclReadLine::shiftcursorRight {CMDLINE CMDLINE_CURSOR} {
+# eputsvars CMDLINE CMDLINE_CURSOR
+    set len [string length $CMDLINE]
+    if {$CMDLINE_CURSOR >= $len} {return $CMDLINE_CURSOR}
+    set newlines [regexp -all -inline -indices -- {\n} [string range $CMDLINE $CMDLINE_CURSOR end]]
+    if {[llength $newlines] == 0} {
+        return $len
+    }
+    set CMDLINE_CURSOR [expr {$CMDLINE_CURSOR + [lindex $newlines 0 0]}]
+    return $CMDLINE_CURSOR
+}
+
 # Key bindings
 proc TclReadLine::handleEscapes {} {
     variable CMDLINE
@@ -414,6 +478,30 @@ proc TclReadLine::handleEscapes {} {
             }
             "\[1;5D" { ;# Control-Cursor Left
                 set CMDLINE_CURSOR [tcl_startOfPreviousWord $CMDLINE $CMDLINE_CURSOR]
+                set found 1; break
+            }
+            "\[1;5A" { ;# Control-Cursor Up
+                set CMDLINE_CURSOR [TclReadLine::cursorUp $CMDLINE $CMDLINE_CURSOR]
+                set found 1; break
+            }
+            "\[1;5B" { ;# Control-Cursor Down
+                set CMDLINE_CURSOR [TclReadLine::cursorDown $CMDLINE $CMDLINE_CURSOR]
+                set found 1; break
+            }
+            "\[1;2A" { ;# Shift-Cursor Up
+                set CMDLINE_CURSOR [TclReadLine::cursorUp $CMDLINE $CMDLINE_CURSOR]
+                set found 1; break
+            }
+            "\[1;2B" { ;# Shift-Cursor Down
+                set CMDLINE_CURSOR [TclReadLine::cursorDown $CMDLINE $CMDLINE_CURSOR]
+                set found 1; break
+            }
+            "\[1;2C" { ;# Shift-Cursor right
+                set CMDLINE_CURSOR [TclReadLine::shiftcursorRight $CMDLINE $CMDLINE_CURSOR]
+                set found 1; break
+            }
+            "\[1;2D" { ;# Shift-Cursor left
+                set CMDLINE_CURSOR [TclReadLine::shiftcursorLeft $CMDLINE $CMDLINE_CURSOR]
                 set found 1; break
             }
             "\[Z" { ;# Shift-Tab
