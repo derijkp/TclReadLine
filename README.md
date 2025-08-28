@@ -24,6 +24,7 @@ It was further modified by Peter De Rijk, adding the following functionality:
     printlimit 200
         or unset with 
     printlimit ""
+- turn off auto glob substitution (with option var CMDLINE_GLOB, default 0) (gave strange errors sometimes)
 
 Installation
 ------------
@@ -33,6 +34,9 @@ Usage
 -----
 ```
 package require TclReadLine
+# you can set the prompt string, this string is substituted each time, so you can use e.g. [pwd] to display the current wd in the prompt
+set ::TclReadLine::PROMPT {tclsh[info patchlevel] \[[pwd]\]% }
+# start interactive use with TclReadLine
 TclReadLine::interact
 ```
 

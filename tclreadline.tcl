@@ -27,6 +27,7 @@
 #     printlimit 200
 #         or unset with 
 #     printlimit ""
+# - turn off auto glob substitution (with option var CMDLINE_GLOB, default 0) (gave strange errors sometimes)
 
 # example usage in .tclshrc:
 #
@@ -86,6 +87,7 @@ namespace eval TclReadLine {
     variable CMDLINE_TABCOMPLETION 0
     variable CMDLINE_LINES 0
     variable CMDLINE_PARTIAL
+    variable CMDLINE_GLOB 0
     
     variable ALIASES
     array set ALIASES {}
@@ -1104,42 +1106,43 @@ proc TclReadLine::tclline {} {
                         regsub -- "(?q)$cmd" $cmdline $TclReadLine::ALIASES($cmd) cmdline
                     }
                     
-                    # Perform glob substitutions:
-                    set cmdline [string map {
-                        "\\*" \0
-                        "\\~" \1
-                    } $cmdline]
-                    #
-                    # Prevent glob substitution of *,~ for tcl commands
-                    #
-                    if {[info commands $cmd] != ""} {
+                    if {$TclReadLine::CMDLINE_GLOB} {
+                        # Perform glob substitutions:
                         set cmdline [string map {
-                            "\*" \0
-                            "\~" \1
+                            "\\*" \0
+                            "\\~" \1
+                        } $cmdline]
+                        #
+                        # Prevent glob substitution of *,~ for tcl commands
+                        #
+                        if {[info commands $cmd] != ""} {
+                            set cmdline [string map {
+                                "\*" \0
+                                "\~" \1
+                            } $cmdline]
+                        }
+                        while {[regexp -indices \
+                                    {([\w/\.]*(?:~|\*)[\w/\.]*)+} $cmdline x]
+                           } {
+                            foreach {i n} $x break
+                            set s [string range $cmdline $i $n]
+                            set x [glob -nocomplain -- $s]
+                            
+                            # If glob can't find anything then don't do
+                            # glob substitution, pass * or ~ as literals:
+                            if {$x == ""} {
+                                set x [string map {
+                                    "*" \0
+                                    "~" \1
+                                } $s]
+                            }
+                            set cmdline [string replace $cmdline $i $n $x]
+                        }
+                        set cmdline [string map {
+                            \0 "*"
+                            \1 "~"
                         } $cmdline]
                     }
-                    while {[regexp -indices \
-                                {([\w/\.]*(?:~|\*)[\w/\.]*)+} $cmdline x]
-                       } {
-                        foreach {i n} $x break
-                        set s [string range $cmdline $i $n]
-                        set x [glob -nocomplain -- $s]
-                        
-                        # If glob can't find anything then don't do
-                        # glob substitution, pass * or ~ as literals:
-                        if {$x == ""} {
-                            set x [string map {
-                                "*" \0
-                                "~" \1
-                            } $s]
-                        }
-                        set cmdline [string replace $cmdline $i $n $x]
-                    }
-                    set cmdline [string map {
-                        \0 "*"
-                        \1 "~"
-                    } $cmdline]
-                    
                     rename ::info ::_info
                     rename TclReadLine::localInfo ::info
                     
