@@ -11,18 +11,22 @@
 # Also added ability to extend the completion handlers
 #
 # Modified by Peter De Rijk
-# - ctrl-C (sigint) will interrupt running code while keeping shell alive (instead of ignoring with Tclx or killing entire program without)
-# - completion using Shift-Tab (so we can still enter/copy-paste actual tabs)
-# - optional tab completion (with Tab), but excluding tabs at the start of a line (allows copy-paste for code indented with tabs, but not tabs in the code)
-# - catch errors in tab completion code
-# - ctrl-left and ctrl-right to move left and right by word
-# - ctrl-up (or shift-up) and ctrl-down (or shift-down) to move up and down one line in editing mode
-# - shift-left and shift-right to move to begin and end of the current line in editing mode
-# - limit the number of characters displayed of return/result, can e.g. be set to max 200 characters with
+# - signal handling
+#   - ctrl-C (sigint) will interrupt running code while keeping shell alive (instead of ignoring with Tclx or killing entire program without)
+#   - default signal handling using Expect (not TclX as it interferes with some code)
+# - completion
+#   - completion using Shift-Tab (so we can still enter/copy-paste actual tabs)
+#   - completion using TAB is by default off, but can be turned on (and off again) using Control-t
+#   - TAB completion is not attempted for tabs at the start of a line (allows copy-paste for code indented with tabs, but not tabs in the code)
+#   - catch errors in tab completion code
+# - cursor control in editing mode
+#   - ctrl-up (or shift-up) and ctrl-down (or shift-down) to move up and down one line in editing mode
+#   - shift-left and shift-right to move to begin and end of the current line in editing mode
+#   - ctrl-left and ctrl-right to move left and right by word
+# - (optionally) limit the number of characters displayed of return/result (default 1000 characters), can e.g. be set to max 200 characters with
 #     printlimit 200
 #         or unset with 
 #     printlimit ""
-# - default signal handling using Expect (not TclX as it interferes with some code)
 
 # example usage in .tclshrc:
 #
