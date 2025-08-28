@@ -83,6 +83,7 @@ namespace eval TclReadLine {
     variable READLINE_LATENCY 10 ;# in ms
     
     variable CMDLINE ""
+    variable CMDLINE_sinceprompt ""
     variable CMDLINE_CURSOR 0
     variable CMDLINE_TABCOMPLETION 0
     variable CMDLINE_LINES 0
@@ -218,7 +219,7 @@ proc TclReadLine::localPuts {args} {
 }
 
 proc TclReadLine::prompt {{txt ""}} {
-    # eputsvars txt
+# eputsvars txt
     if { "" != [info var ::tcl_prompt1] } {
         rename ::puts ::_origPuts
         rename TclReadLine::localPuts ::puts
@@ -1046,25 +1047,21 @@ proc TclReadLine::check_partial_keyseq {buffer} {
     }
 }
 
-proc putsvars args {
-	foreach varVar $args {
-		upvar $varVar var
-		if {[info exists var]} {
-			TclReadLine::print [list set $varVar $var]\n
-		} else {
-			TclReadLine::print [list unset $varVar]\n
-		}
-	}
-}
-
+# main function: 
+# accepts and handles input (responds to fileevent)
+#     control characters are handled in TclReadLine::handleControls, but this is called from here
+# runs commands
+# make new prompt
 proc TclReadLine::tclline {} {
     variable COLUMNS
     variable CMDLINE_CURSOR
     variable CMDLINE
+    variable CMDLINE_sinceprompt
     variable CMDLINE_TABCOMPLETION
     set char ""
     set keybuffer [read stdin]
     set COLUMNS [getColumns]
+    # eputsvars tclline CMDLINE_CURSOR CMDLINE keybuffer
     check_partial_keyseq keybuffer
     
     while {$keybuffer != ""} {
@@ -1077,22 +1074,23 @@ proc TclReadLine::tclline {} {
         }
         if {[string is print $char]} {
             set x $CMDLINE_CURSOR
-            
-            if {$x < 1 && [string trim $char] == ""} continue
-            
             set trailing [string range $CMDLINE $x end]
             set CMDLINE [string replace $CMDLINE $x end]
             append CMDLINE $char
             append CMDLINE $trailing
+            append CMDLINE_sinceprompt $char
+            append CMDLINE_sinceprompt $trailing
             incr CMDLINE_CURSOR
         } elseif {$char == "\t"} {
             if {[catch {handleCompletion} msg]} {
                 print "error in TclReadLine tab completion: $msg\n"
             }
        } elseif {$char == "\n" || $char == "\r"} {
-            if {[info complete $CMDLINE] &&
-                [string index $CMDLINE end] != "\\"} {
-                 lineInput
+            if {[info complete $CMDLINE] && [string index $CMDLINE end] != "\\"} {
+                # if text has been added since the last prompt (e.g via paste), it would not be outputted; make sure it does get out
+                print [regsub -all \t $CMDLINE_sinceprompt {        }]
+                set CMDLINE_sinceprompt {}
+                lineInput
                 print "\n" nowait
                 uplevel \#0 {
                     # Handle aliases:
@@ -1176,6 +1174,8 @@ proc TclReadLine::tclline {} {
                 set CMDLINE [string replace $CMDLINE $x end]
                 append CMDLINE $char
                 append CMDLINE $trailing
+                append CMDLINE_sinceprompt $char
+                append CMDLINE_sinceprompt $trailing
                 incr CMDLINE_CURSOR
 # print "\n" nowait
             }
@@ -1183,6 +1183,7 @@ proc TclReadLine::tclline {} {
             handleControls
         }
     }
+    set TclReadLine::CMDLINE_sinceprompt ""
     prompt $CMDLINE
 }
 
