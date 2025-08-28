@@ -12,14 +12,15 @@
 #
 # Modified by Peter De Rijk
 # - ctrl-C (sigint) will interrupt running code while keeping shell alive (instead of ignoring with Tclx or killing entire program without)
-# - tab completion using Shift-Tab (so we can still enter/copy-paste actual tabs)
+# - completion using Shift-Tab (so we can still enter/copy-paste actual tabs)
+# - optional tab completion (with Tab), but excluding tabs at the start of a line (allows copy-paste for code indented with tabs, but not tabs in the code)
+# - catch errors in tab completion code
 # - ctrl-left and ctrl-right to move left and right by word
 # - limit the number of characters displayed of return/result, can e.g. be set to max 200 characters with
 #     printlimit 200
 #         or unset with 
 #     printlimit ""
 # - default signal handling using Expect (not TclX as it interferes with some code)
-# - catch errors in tab completion code
 
 # example usage in .tclshrc:
 #
@@ -76,7 +77,7 @@ namespace eval TclReadLine {
     
     variable CMDLINE ""
     variable CMDLINE_CURSOR 0
-    variable CMDLINE_TABCOMPLETION 1
+    variable CMDLINE_TABCOMPLETION 0
     variable CMDLINE_LINES 0
     variable CMDLINE_PARTIAL
     
@@ -91,6 +92,27 @@ namespace eval TclReadLine {
     variable HISTFILE $::env(HOME)/.tclline_history
     variable  RCFILE $::env(HOME)/.tcllinerc
 }
+
+# debugging help procs
+proc TclReadLine::eputs {args} {
+	set f [open $::env(HOME)/tmp/log a]
+	puts $f $args
+	close $f
+}
+
+proc TclReadLine::eputsvars {args} {
+	set f [open $::env(HOME)/tmp/log a]
+	foreach var $args {
+		if {[catch {uplevel [list set $var]} value]} {
+			puts $f [list unset $var]
+		} else {
+			puts $f [list set $var $value]
+		}
+	}
+	close $f
+}
+
+
 
 proc TclReadLine::ESC {} {
     return "\033"
@@ -188,6 +210,7 @@ proc TclReadLine::localPuts {args} {
 }
 
 proc TclReadLine::prompt {{txt ""}} {
+    # eputsvars txt
     if { "" != [info var ::tcl_prompt1] } {
         rename ::puts ::_origPuts
         rename TclReadLine::localPuts ::puts
@@ -208,10 +231,12 @@ proc TclReadLine::prompt {{txt ""}} {
     set txt "$prompt$txt"
     # Calculate how many extra lines we need to display.
     # Also calculate cursor position:
-# putsvars CMDLINE_LINES CMDLINE_CURSOR COLUMNS prompt txt
+    # eputsvars CMDLINE_LINES CMDLINE_CURSOR COLUMNS prompt txt
     set n -1
     set totalLen 0
-    set cursorLen [expr {$CMDLINE_CURSOR+[string length $prompt]}]
+    set visprompt [regsub -all {\x1b\[[0-9;]*[a-zA-Z]} $prompt {}]  ;# strip colour codes
+    set cursorLen [expr {$CMDLINE_CURSOR+[string length $visprompt]}]
+    # set cursorLen [expr {$CMDLINE_CURSOR+[string length $prompt]}]
     set row 0
     set col 0
     
@@ -230,17 +255,16 @@ proc TclReadLine::prompt {{txt ""}} {
                 set col 0
                 incr row
             } else {
+		# make sure the cursor is properly positioned in the presence of tabs
 		set tabs [regexp -all \t [string range $line 0 [expr {$col-1}]]]
 		if {$tabs} {
 			set col [expr {$col + 7*$tabs}]
-			if {$row == 0} {
-				incr col -[string length $prompt]
-			}
 		}
             }
             set found 1
         }
         incr n [expr {int(ceil(double($len)/$COLUMNS))}]
+        regsub -all \t $line {        } line
         while {$len > 0} {
             lappend out [string range $line 0 [expr {$COLUMNS-1}]]
             set line [string range $line $COLUMNS end]
@@ -274,6 +298,8 @@ proc TclReadLine::prompt {{txt ""}} {
 }
 
 proc TclReadLine::print {txt {wait wait}} {
+# eputs ----TclReadLine::print
+# eputs [list set txt $txt]
     # Sends output to stdout chunks at a time.
     # This is to prevent the terminal from
     # hanging if we output too much:
@@ -286,13 +312,17 @@ proc TclReadLine::print {txt {wait wait}} {
     }
 }
 
+set ::TclReadLine::printlimit 1000
+
 proc TclReadLine::printresult {txt {wait wait}} {
-# puts txt=\"$txt\"
+# eputs ----TclReadLine::printresult
+# eputs [list set txt $txt]
+    if {$txt eq "" || $txt eq "\n"} return
     # limit size of output to term
-    if {[info exists ::TclReadLine::printlimit]} {
+    if {$::TclReadLine::printlimit ne ""} {
         if {[::string length $txt] > $::TclReadLine::printlimit} {
 		set half [expr {$::TclReadLine::printlimit/2}]
-		set txt "[string range $txt 0 $half]\n ... skipping [expr {[string length $txt]-$::TclReadLine::printlimit}] characters ... \n[string range $txt end-$half end]"
+		set txt "[string range $txt 0 $half]\n ... skipping [expr {[string length $txt]-$::TclReadLine::printlimit}] characters (you can turn this off using 'printlimit {}') ... \n[string range $txt end-$half end]"
 	}
     }
     # Sends output to stdout chunks at a time.
@@ -347,6 +377,7 @@ proc TclReadLine::unalias {word} {
 proc TclReadLine::handleEscapes {} {
     variable CMDLINE
     variable CMDLINE_CURSOR
+    variable CMDLINE_TABCOMPLETION
     upvar 1 keybuffer keybuffer
     set seq ""
     set found 0
@@ -386,7 +417,12 @@ proc TclReadLine::handleEscapes {} {
                 set found 1; break
             }
             "\[Z" { ;# Shift-Tab
-                if {[catch {handleCompletion} msg]} {
+                if {[catch {
+                    set keep $CMDLINE_TABCOMPLETION
+		    set CMDLINE_TABCOMPLETION 1
+                    handleCompletion
+		    set CMDLINE_TABCOMPLETION $keep
+                } msg]} {
                     print "error in TclReadLine tab completion: $msg\n"
                 }
                 set found 1; break
@@ -555,8 +591,13 @@ proc TclReadLine::handleCompletionBase {} {
     variable CMDLINE_TABCOMPLETION
     set prev [string index $CMDLINE [expr {$CMDLINE_CURSOR-1}]]
     if {!$CMDLINE_TABCOMPLETION || $CMDLINE_CURSOR == 0 || $prev eq "\n" || $prev eq "\t"} {
-        append CMDLINE \t
-        incr CMDLINE_CURSOR
+            # treat like all other characters instead, is needed to allow editing tabs in multiline command
+            set x $CMDLINE_CURSOR
+            set trailing [string range $CMDLINE $x end]
+            set CMDLINE [string replace $CMDLINE $x end]
+            append CMDLINE \t
+            append CMDLINE $trailing
+            incr CMDLINE_CURSOR
         return
     }
     set vars ""
@@ -566,15 +607,18 @@ proc TclReadLine::handleCompletionBase {} {
     
     # First find out what kind of word we need to complete:
     set wordstart [string last " " $CMDLINE [expr {$CMDLINE_CURSOR-1}]]
+    set wordstarttab [string last "\t" $CMDLINE [expr {$CMDLINE_CURSOR-1}]]
+    if {$wordstarttab > $wordstart} {set wordstart $wordstarttab}
     incr wordstart
     set wordend [string first " " $CMDLINE $wordstart]
+    set wordsendtab [string first "\t" $CMDLINE $wordstart]
+    if {$wordsendtab > $wordend} {set wordend $wordsendtab}
     if {$wordend == -1} {
         set wordend end
     } else {
         incr wordend -1
     }
     set word [string range $CMDLINE $wordstart $wordend]
-    
     if {[string trim $word] == ""} return
     
     set firstchar [string index $word 0]
@@ -780,12 +824,14 @@ proc TclReadLine::setHistory {hlist} {
 # main()
 
 proc TclReadLine::rawInput {} {
+# eputs rawInput
     fconfigure stdin -buffering none -blocking 0
     fconfigure stdout -buffering none -translation crlf
     exec stty raw -echo isig
 }
 
 proc TclReadLine::lineInput {} {
+# eputs lineInput
     fconfigure stdin -buffering line -blocking 1 -buffersize 16384
     fconfigure stdout -buffering line -buffersize 16384
     exec stty -raw echo isig
@@ -873,6 +919,11 @@ proc TclReadLine::interact {} {
     
     variable ThisScript [info script]
     
+    puts "TclReadLine activated"
+    puts "    Use Control-t to toggle completion using Tab (Shit-Tab can allways be used)"
+    puts "    By default, output of return values is limited to 1000 characters."
+    puts "        Use 'printlimit \"\"' to disable, or e.g. 'printlimit 100' to limit to 100 characters"
+
     tclline ;# emit the first prompt
     
     fileevent stdin readable TclReadLine::tclline
@@ -916,16 +967,15 @@ proc TclReadLine::tclline {} {
     variable COLUMNS
     variable CMDLINE_CURSOR
     variable CMDLINE
+    variable CMDLINE_TABCOMPLETION
     set char ""
     set keybuffer [read stdin]
     set COLUMNS [getColumns]
-    
     check_partial_keyseq keybuffer
     
     while {$keybuffer != ""} {
         if {[eof stdin]} return
         set char [readbuf keybuffer]
-# print $char
         if {$char == ""} {
             # Sleep for a bit to reduce CPU overhead:
             after 40
@@ -942,18 +992,10 @@ proc TclReadLine::tclline {} {
             append CMDLINE $trailing
             incr CMDLINE_CURSOR
         } elseif {$char == "\t"} {
-            # if {[catch {handleCompletion} msg]} {
-            #     print "error in TclReadLine tab completion: $msg\n"
-            # }
-            # if {$x < 1 && [string trim $char] == ""} continue
-            # treat like all other characters instead (but copied here for now)
-            set x $CMDLINE_CURSOR
-            set trailing [string range $CMDLINE $x end]
-            set CMDLINE [string replace $CMDLINE $x end]
-            append CMDLINE $char
-            append CMDLINE $trailing
-            incr CMDLINE_CURSOR
-        } elseif {$char == "\n" || $char == "\r"} {
+            if {[catch {handleCompletion} msg]} {
+                print "error in TclReadLine tab completion: $msg\n"
+            }
+       } elseif {$char == "\n" || $char == "\r"} {
             if {[info complete $CMDLINE] &&
                 [string index $CMDLINE end] != "\\"} {
                  lineInput
@@ -1040,7 +1082,7 @@ proc TclReadLine::tclline {} {
                 append CMDLINE $char
                 append CMDLINE $trailing
                 incr CMDLINE_CURSOR
-print "\n" nowait
+# print "\n" nowait
             }
         } else {
             handleControls
@@ -1058,11 +1100,7 @@ proc TclReadLine::printlimit {args} {
 		}
 	}
 	set num [lindex $args 0]
-	if {$num eq ""} {
-		unset -nocomplain ::TclReadLine::printlimit
-	} else {
-		set ::TclReadLine::printlimit $num
-	}
+	set ::TclReadLine::printlimit $num
 }
 
 proc printlimit {args} {
@@ -1071,9 +1109,10 @@ proc printlimit {args} {
 
 proc TclReadLine::show {txt} {
 	::set keep $::TclReadLine::printlimit
-	::unset ::TclReadLine::printlimit
+	::set ::TclReadLine::printlimit {}
 	TclReadLine::print $txt
 	::set ::TclReadLine::printlimit $keep
+	return
 }
 
 # start immediately if invoked as a script:
@@ -1095,5 +1134,4 @@ if {!$::tcl_interactive && [info script] eq $::argv0} {
 #    package require TclReadLine
 #    TclReadLine::interact
 #  }
-
 
