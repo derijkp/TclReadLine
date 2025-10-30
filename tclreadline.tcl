@@ -348,6 +348,7 @@ proc TclReadLine::printresult {txt {wait wait}} {
 
 proc TclReadLine::unknown {args} {
     
+  if {![info exists ::auto_noexec] && ([info level] == 1) && ([info script] eq "") && [info exists ::tcl_interactive] && $::tcl_interactive} {
     set name [lindex $args 0]
     set cmdline $TclReadLine::CMDLINE
     set cmd [string trim [regexp -inline {^\s*[^\s]+} $cmdline]]
@@ -368,6 +369,7 @@ proc TclReadLine::unknown {args} {
         }
         return $ret
     }
+  }
     
     uplevel _unknown $args
 }
@@ -968,14 +970,14 @@ proc TclReadLine::doExit {{code 0}} {
 
 proc TclReadLine::restore {} {
     lineInput
-    rename ::unknown TclReadLine::unknown
-    rename ::_unknown ::unknown
+#    rename ::unknown TclReadLine::unknown
+#    rename ::_unknown ::unknown
 }
 
 proc TclReadLine::interact {} {
 
-    rename ::unknown ::_unknown
-    rename TclReadLine::unknown ::unknown
+#    rename ::unknown ::_unknown
+#    rename TclReadLine::unknown ::unknown
     
     variable RCFILE
     if {[file exists $RCFILE]} {
