@@ -1017,7 +1017,7 @@ proc TclReadLine::interact {} {
     variable ThisScript [info script]
     
     puts "TclReadLine activated"
-    puts "    Use Control-t to toggle completion using Tab (Shit-Tab can allways be used)"
+    puts "    Use Control-t to toggle completion using Tab (Shift-Tab can allways be used)"
     puts "    By default, output of return values is limited to 1000 characters."
     puts "        Use 'printlimit \"\"' to disable, or e.g. 'printlimit 100' to limit to 100 characters"
 
