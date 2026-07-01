@@ -297,7 +297,7 @@ proc TclReadLine::prompt {{txt ""}} {
     set CMDLINE_LINES $n
     
     # Output line(s):
-    print "\r$txt"
+    print "\r$txt" nowait
     
     if {$row} {
         print "[ESC]\[${row}A" nowait
@@ -1065,6 +1065,11 @@ proc TclReadLine::tclline {} {
     set COLUMNS [getColumns]
     # eputsvars tclline CMDLINE_CURSOR CMDLINE keybuffer
     check_partial_keyseq keybuffer
+    # Absorb all immediately available input at once so that a large paste is
+    # processed in a single tclline call (avoids O(n^2) redraws and re-entrancy).
+    while {[string length [set _more [read stdin]]]} {
+        append keybuffer $_more
+    }
     
     while {$keybuffer != ""} {
         if {[eof stdin]} return
@@ -1090,7 +1095,7 @@ proc TclReadLine::tclline {} {
        } elseif {$char == "\n" || $char == "\r"} {
             if {[info complete $CMDLINE] && [string index $CMDLINE end] != "\\"} {
                 # if text has been added since the last prompt (e.g via paste), it would not be outputted; make sure it does get out
-                print [regsub -all \t $CMDLINE_sinceprompt {        }]
+                print [regsub -all \t $CMDLINE_sinceprompt {        }] nowait
                 set CMDLINE_sinceprompt {}
                 lineInput
                 print "\n" nowait
@@ -1185,7 +1190,7 @@ proc TclReadLine::tclline {} {
             handleControls
         }
     }
-    set TclReadLine::CMDLINE_sinceprompt ""
+    set ::TclReadLine::CMDLINE_sinceprompt ""
     prompt $CMDLINE
 }
 
