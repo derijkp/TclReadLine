@@ -121,8 +121,6 @@ proc TclReadLine::eputsvars {args} {
 	close $f
 }
 
-
-
 proc TclReadLine::ESC {} {
     return "\033"
 }
@@ -180,6 +178,8 @@ proc TclReadLine::getColumns {} {
             return [set COLUMNS $cols]
         }
     }
+    # Fallback default if stty fails completely
+    if {$cols == 0} { set cols 80 }
     set COLUMNS $cols
 }
 
@@ -288,10 +288,13 @@ proc TclReadLine::prompt {{txt ""}} {
         if {$mid} {
             print "[ESC]\[${mid}B" nowait
         }
+        # Batch all clear+up sequences into one print to minimise syscalls
+        # (stdout is unbuffered, so each print = one write()):
+        set _clearseq ""
         for {set x 0} {$x < $end} {incr x} {
-            clearline
-            print "[ESC]\[1A" nowait
+            append _clearseq "\033\[2K\r\033\[1A"
         }
+        print $_clearseq nowait
     }
     clearline
     set CMDLINE_LINES $n
@@ -554,7 +557,6 @@ proc TclReadLine::handleEscapes {} {
 }
 
 proc TclReadLine::handleControls {} {
-    
     variable CMDLINE
     variable CMDLINE_CURSOR
     variable CMDLINE_TABCOMPLETION
@@ -595,10 +597,10 @@ proc TclReadLine::handleControls {} {
         }
         \u000b { ;# ^k
             variable YANK
-            set YANK  [string range $CMDLINE [expr {$CMDLINE_CURSOR  } ] end ]
-            set CMDLINE [string range $CMDLINE 0 [expr {$CMDLINE_CURSOR - 1 } ]]
+            set YANK [string range $CMDLINE $CMDLINE_CURSOR end]
+            set CMDLINE [string range $CMDLINE 0 [expr {$CMDLINE_CURSOR - 1}]]
         }
-        \u0014 { ;# ^t
+        \u0014 { ;# ^t - Toggle completion
             if {$CMDLINE_TABCOMPLETION} {
                 set CMDLINE_TABCOMPLETION 0
                 print "TAB completion off\n"
@@ -641,8 +643,7 @@ proc TclReadLine::handleControls {} {
             handleEscapes
         }
     }
-    # Rate limiter:
-    set keybuffer ""
+    # REMOVED: set keybuffer "" <- This was eating trailing paste bytes or confusing async characters!
 }
 
 proc TclReadLine::shortMatch {maybe} {
@@ -924,6 +925,8 @@ proc TclReadLine::rawInput {} {
 # eputs rawInput
     fconfigure stdin -buffering none -blocking 0
     fconfigure stdout -buffering none -translation crlf
+    # CODE CHANGE: Force an explicit terminal driver flush of pending input/output 
+    # queues at the exact moment we re-enter raw mode to prevent racing echoes.
     exec stty raw -echo isig
 }
 
@@ -931,7 +934,12 @@ proc TclReadLine::lineInput {} {
 # eputs lineInput
     fconfigure stdin -buffering line -blocking 1 -buffersize 16384
     fconfigure stdout -buffering line -buffersize 16384
-    exec stty -raw echo isig
+    # Switch from raw mode to cooked mode (-raw),
+    # but explicitly prevent the OS from echoing characters (-echo).
+    # This prevents the kernel from printing the next pasted command text
+    # while the current command is running.
+    exec stty -raw -echo isig
+
 }
 
 proc TclReadLine::doExit {{code 0}} {
@@ -943,6 +951,7 @@ proc TclReadLine::doExit {{code 0}} {
     
     restore ;# restore "info' command -
     lineInput
+    exec stty sane
     
     set hlist [getHistory]
     #
@@ -1010,6 +1019,9 @@ proc TclReadLine::interact {} {
     
     rawInput
     
+    # Initialize columns here, changes should be picked up by SIGWINCH
+    getColumns 
+
     # This is to restore the environment on exit:
     # Do not unalias this!
     alias exit TclReadLine::doExit
@@ -1054,51 +1066,87 @@ proc TclReadLine::check_partial_keyseq {buffer} {
 #     control characters are handled in TclReadLine::handleControls, but this is called from here
 # runs commands
 # make new prompt
+
 proc TclReadLine::tclline {} {
     variable COLUMNS
     variable CMDLINE_CURSOR
     variable CMDLINE
     variable CMDLINE_sinceprompt
     variable CMDLINE_TABCOMPLETION
-    set char ""
-    set keybuffer [read stdin]
-    set COLUMNS [getColumns]
-    # eputsvars tclline CMDLINE_CURSOR CMDLINE keybuffer
-    check_partial_keyseq keybuffer
-    # Absorb all immediately available input at once so that a large paste is
-    # processed in a single tclline call (avoids O(n^2) redraws and re-entrancy).
-    while {[string length [set _more [read stdin]]]} {
-        append keybuffer $_more
-    }
     
-    while {$keybuffer != ""} {
-        if {[eof stdin]} return
-        set char [readbuf keybuffer]
-        if {$char == ""} {
-            # Sleep for a bit to reduce CPU overhead:
-            after 40
-            continue
-        }
+    if {[eof stdin]} return
+    set input_chunk [read stdin]
+    
+    # --- Robust SSH Paste Buffer Accumulation ---
+    after 15
+    while {1} {
+        set _more [read stdin]
+        if {$_more eq ""} break
+        append input_chunk $_more
+        after 5
+    }
+    # --------------------------------------------
+
+    variable keybuffer
+    if {![info exists keybuffer]} { set keybuffer "" }
+    append keybuffer $input_chunk
+
+    check_partial_keyseq keybuffer
+    
+    while {[string length $keybuffer] > 0} {
+        set char [string index $keybuffer 0]
+        set keybuffer [string range $keybuffer 1 end]
+        
+        if {$char eq ""} continue
+        
+        # 1. Performance optimization for printable character blocks (Pastes)
         if {[string is print $char]} {
+            set run $char
+            while {[string length $keybuffer] > 0} {
+                set _c0 [string index $keybuffer 0]
+                if {![string is print $_c0]} break
+                append run $_c0
+                set keybuffer [string range $keybuffer 1 end]
+            }
+            
             set x $CMDLINE_CURSOR
             set trailing [string range $CMDLINE $x end]
-            set CMDLINE [string replace $CMDLINE $x end]
-            append CMDLINE $char
+            set CMDLINE [string range $CMDLINE 0 [expr {$x - 1}]]
+            append CMDLINE $run
             append CMDLINE $trailing
-            append CMDLINE_sinceprompt $char
+            append CMDLINE_sinceprompt $run
             append CMDLINE_sinceprompt $trailing
-            incr CMDLINE_CURSOR
-        } elseif {$char == "\t"} {
-            if {[catch {handleCompletion} msg]} {
-                print "error in TclReadLine tab completion: $msg\n"
+            incr CMDLINE_CURSOR [string length $run]
+            
+        } elseif {$char eq "\t"} {
+            if {$CMDLINE_TABCOMPLETION && [string length $keybuffer] == 0} {
+                if {[catch {handleCompletion} msg]} {
+                    print "error in TclReadLine tab completion: $msg\n"
+                }
+            } else {
+                set x $CMDLINE_CURSOR
+                set trailing [string range $CMDLINE $x end]
+                set CMDLINE [string replace $CMDLINE $x end]
+                append CMDLINE "\t"
+                append CMDLINE $trailing
+                append CMDLINE_sinceprompt "\t"
+                append CMDLINE_sinceprompt $trailing
+                incr CMDLINE_CURSOR
             }
-       } elseif {$char == "\n" || $char == "\r"} {
+        } elseif {$char eq "\n" || $char eq "\r"} {
             if {[info complete $CMDLINE] && [string index $CMDLINE end] != "\\"} {
-                # if text has been added since the last prompt (e.g via paste), it would not be outputted; make sure it does get out
                 print [regsub -all \t $CMDLINE_sinceprompt {        }] nowait
                 set CMDLINE_sinceprompt {}
-                lineInput
+                
+                # Aggressively drain any bytes currently waiting in the OS kernel buffer
+                # while we are still safely inside raw (-echo) mode.
+                while {[set _extra [read stdin]] ne ""} {
+                    append keybuffer $_extra
+                }
+
                 print "\n" nowait
+                lineInput
+                
                 uplevel \#0 {
                     # Handle aliases:
                     set cmdline $TclReadLine::CMDLINE
@@ -1110,7 +1158,7 @@ proc TclReadLine::tclline {} {
                     if {[info exists TclReadLine::ALIASES($cmd)]} {
                         regsub -- "(?q)$cmd" $cmdline $TclReadLine::ALIASES($cmd) cmdline
                     }
-                    
+
                     if {$TclReadLine::CMDLINE_GLOB} {
                         # Perform glob substitutions:
                         set cmdline [string map {
@@ -1148,6 +1196,7 @@ proc TclReadLine::tclline {} {
                             \1 "~"
                         } $cmdline]
                     }
+                    
                     rename ::info ::_info
                     rename TclReadLine::localInfo ::info
                     
@@ -1174,7 +1223,6 @@ proc TclReadLine::tclline {} {
                 rawInput
             } else {
                 set x $CMDLINE_CURSOR
-                
                 if {$x < 1 && [string trim $char] == ""} continue
                 
                 set trailing [string range $CMDLINE $x end]
@@ -1184,12 +1232,25 @@ proc TclReadLine::tclline {} {
                 append CMDLINE_sinceprompt $char
                 append CMDLINE_sinceprompt $trailing
                 incr CMDLINE_CURSOR
-# print "\n" nowait
             }
         } else {
-            handleControls
+            # 2. Control Characters & Escape Sequences
+            if {$char eq "\u001b"} {
+                handleEscapes
+            } else {
+                set _saved_queue $keybuffer
+                set keybuffer ""
+                handleControls
+                set keybuffer $_saved_queue
+            }
+        }
+        
+        set _extra [read stdin]
+        if {$_extra ne ""} {
+            append keybuffer $_extra
         }
     }
+    
     set ::TclReadLine::CMDLINE_sinceprompt ""
     prompt $CMDLINE
 }
@@ -1237,4 +1298,3 @@ if {!$::tcl_interactive && [info script] eq $::argv0} {
 #    package require TclReadLine
 #    TclReadLine::interact
 #  }
-
