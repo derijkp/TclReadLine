@@ -112,10 +112,10 @@ proc TclReadLine::eputs {args} {
 proc TclReadLine::eputsvars {args} {
 	set f [open $::env(HOME)/tmp/log a]
 	foreach var $args {
-		if {[catch {uplevel [list set $var]} value]} {
-			puts $f [list unset $var]
+		if {[catch {uplevel [list ::set $var]} value]} {
+			puts $f [list ::unset $var]
 		} else {
-			puts $f [list set $var $value]
+			puts $f [list ::set $var $value]
 		}
 	}
 	close $f
@@ -1154,9 +1154,9 @@ proc TclReadLine::tclline {} {
                     # Add the cmd line to history before doing any substitutions
                     # 
                     history add $cmdline
-                    set cmd [string trim [regexp -inline {^\s*[^\s]+} $cmdline]]
-                    if {[info exists TclReadLine::ALIASES($cmd)]} {
-                        regsub -- "(?q)$cmd" $cmdline $TclReadLine::ALIASES($cmd) cmdline
+                    set TclReadLine::cmd [string trim [regexp -inline {^\s*[^\s]+} $cmdline]]
+                    if {[info exists TclReadLine::ALIASES($TclReadLine::cmd)]} {
+                        regsub -- "(?q)$TclReadLine::cmd" $cmdline $TclReadLine::ALIASES($TclReadLine::cmd) cmdline
                     }
 
                     if {$TclReadLine::CMDLINE_GLOB} {
@@ -1168,7 +1168,7 @@ proc TclReadLine::tclline {} {
                         #
                         # Prevent glob substitution of *,~ for tcl commands
                         #
-                        if {[info commands $cmd] != ""} {
+                        if {[info commands $TclReadLine::cmd] != ""} {
                             set cmdline [string map {
                                 "\*" \0
                                 "\~" \1
